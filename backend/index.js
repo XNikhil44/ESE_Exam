@@ -1,0 +1,592 @@
+// ============================================================
+// index.js — AI Smart Complaint Management System
+// Single-file MERN Backend (Express + MongoDB + Anthropic AI)
+// ============================================================
+
+const express   = require("express");
+const mongoose  = require("mongoose");
+const cors      = require("cors");
+const dotenv    = require("dotenv");
+const bcrypt    = require("bcrypt");
+const jwt       = require("jsonwebtoken");
+const Anthropic = require("@anthropic-ai/sdk");
+
+dotenv.config();
+
+const app    = express();
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─────────────────────────────────────────────
+// MIDDLEWARE
+// ─────────────────────────────────────────────
+app.use(cors());
+app.use(express.json());
+
+// ─────────────────────────────────────────────
+// MONGOOSE SCHEMAS & MODELS
+// ─────────────────────────────────────────────
+
+// User Schema
+const UserSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: [true, "Name is required"],
+    trim: true,
+  },
+
+  email: {
+    type: String,
+    required: [true, "Email is required"],
+    unique: true,
+    match: [/^\S+@\S+\.\S+$/, "Invalid email format"],
+    lowercase: true,
+  },
+
+  password: {
+    type: String,
+    required: [true, "Password is required"],
+    minlength: 6,
+  },
+
+  role: {
+    type: String,
+    enum: ["user", "admin"],
+    default: "user",
+  },
+
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+// Hash password before saving
+UserSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
+
+  this.password = await bcrypt.hash(this.password, 10);
+});
+
+// Compare password
+UserSchema.methods.matchPassword = async function (plain) {
+  return bcrypt.compare(plain, this.password);
+};
+
+const User = mongoose.model("User", UserSchema);
+
+// ─────────────────────────────────────────────
+
+// Complaint Schema
+const ComplaintSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: [true, "Name is required"],
+    trim: true,
+  },
+
+  email: {
+    type: String,
+    required: [true, "Email is required"],
+    match: [/^\S+@\S+\.\S+$/, "Invalid email format"],
+    lowercase: true,
+  },
+
+  title: {
+    type: String,
+    required: [true, "Complaint title is required"],
+    trim: true,
+  },
+
+  description: {
+    type: String,
+    required: [true, "Description is required"],
+  },
+
+  category: {
+    type: String,
+    required: [true, "Category is required"],
+    enum: [
+      "Water Supply",
+      "Electricity",
+      "Garbage",
+      "Roads",
+      "Sanitation",
+      "Other",
+    ],
+  },
+
+  location: {
+    type: String,
+    required: [true, "Location is required"],
+    trim: true,
+  },
+
+  status: {
+    type: String,
+    enum: ["Pending", "In Progress", "Resolved", "Rejected"],
+    default: "Pending",
+  },
+
+  // AI-generated fields
+  aiPriority: {
+    type: String,
+    default: "",
+  },
+
+  aiDepartment: {
+    type: String,
+    default: "",
+  },
+
+  aiSummary: {
+    type: String,
+    default: "",
+  },
+
+  aiResponse: {
+    type: String,
+    default: "",
+  },
+
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+const Complaint = mongoose.model("Complaint", ComplaintSchema);
+
+// ─────────────────────────────────────────────
+// JWT AUTH MIDDLEWARE
+// ─────────────────────────────────────────────
+const protect = async (req, res, next) => {
+  let token;
+
+  if (
+    req.headers.authorization &&
+    req.headers.authorization.startsWith("Bearer")
+  ) {
+    try {
+      token = req.headers.authorization.split(" ")[1];
+
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET || "secret123"
+      );
+
+      req.user = await User.findById(decoded.id).select("-password");
+
+      return next();
+
+    } catch {
+      return res
+        .status(401)
+        .json({ error: "Unauthorized — invalid token" });
+    }
+  }
+
+  return res
+    .status(401)
+    .json({ error: "Access denied — no token provided" });
+};
+
+const generateToken = (id) =>
+  jwt.sign(
+    { id },
+    process.env.JWT_SECRET || "secret123",
+    { expiresIn: "7d" }
+  );
+
+// ─────────────────────────────────────────────
+// ROOT HEALTH CHECK
+// ─────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({ message: "AI Complaint Management API is running 🚀" });
+});
+
+// ─────────────────────────────────────────────
+// AUTH ROUTES
+// ─────────────────────────────────────────────
+
+// POST /api/auth/signup
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+
+    const existing = await User.findOne({ email });
+
+    if (existing) {
+      return res
+        .status(400)
+        .json({ error: "Email already registered" });
+    }
+
+    const user = await User.create({
+      name,
+      email,
+      password,
+      role,
+    });
+
+    res.status(201).json({
+      message: "User registered successfully",
+      token: generateToken(user._id),
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/login
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res
+        .status(401)
+        .json({ error: "Invalid credentials" });
+    }
+
+    const match = await user.matchPassword(password);
+
+    if (!match) {
+      return res
+        .status(401)
+        .json({ error: "Invalid credentials" });
+    }
+
+    res.json({
+      message: "Login successful",
+      token: generateToken(user._id),
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/profile
+app.get("/api/auth/profile", protect, (req, res) => {
+  res.json({ user: req.user });
+});
+
+// ─────────────────────────────────────────────
+// COMPLAINT ROUTES
+// ─────────────────────────────────────────────
+
+// POST /api/complaints
+app.post("/api/complaints", async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      title,
+      description,
+      category,
+      location,
+    } = req.body;
+
+    const complaint = await Complaint.create({
+      name,
+      email,
+      title,
+      description,
+      category,
+      location,
+    });
+
+    res.status(201).json({
+      message: "Complaint stored successfully",
+      complaint,
+    });
+
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// GET /api/complaints
+app.get("/api/complaints", async (req, res) => {
+  try {
+    const { category, status } = req.query;
+
+    const filter = {};
+
+    if (category) filter.category = category;
+    if (status) filter.status = status;
+
+    const complaints = await Complaint
+      .find(filter)
+      .sort({ createdAt: -1 });
+
+    res.json({
+      count: complaints.length,
+      complaints,
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// SEARCH BY LOCATION
+app.get("/api/complaints/search", async (req, res) => {
+  try {
+    const { location } = req.query;
+
+    if (!location) {
+      return res
+        .status(400)
+        .json({ error: "location query param required" });
+    }
+
+    const complaints = await Complaint.find({
+      location: {
+        $regex: location,
+        $options: "i",
+      },
+    }).sort({ createdAt: -1 });
+
+    res.json({
+      count: complaints.length,
+      complaints,
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET SINGLE COMPLAINT
+app.get("/api/complaints/:id", async (req, res) => {
+  try {
+    const complaint = await Complaint.findById(req.params.id);
+
+    if (!complaint) {
+      return res
+        .status(404)
+        .json({ error: "Complaint not found" });
+    }
+
+    res.json(complaint);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPDATE COMPLAINT STATUS
+app.put("/api/complaints/:id", protect, async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    const complaint = await Complaint.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!complaint) {
+      return res
+        .status(404)
+        .json({ error: "Complaint not found" });
+    }
+
+    res.json({
+      message: "Status updated",
+      complaint,
+    });
+
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE COMPLAINT
+app.delete("/api/complaints/:id", protect, async (req, res) => {
+  try {
+    const complaint = await Complaint.findByIdAndDelete(req.params.id);
+
+    if (!complaint) {
+      return res
+        .status(404)
+        .json({ error: "Complaint not found" });
+    }
+
+    res.json({
+      message: "Complaint removed",
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// AI ROUTE
+// ─────────────────────────────────────────────
+
+// POST /api/ai/analyze
+app.post("/api/ai/analyze", async (req, res) => {
+  try {
+    let {
+      complaintId,
+      title,
+      description,
+      category,
+    } = req.body;
+
+    let complaint = null;
+
+    // Load complaint from DB
+    if (complaintId) {
+      complaint = await Complaint.findById(complaintId);
+
+      if (!complaint) {
+        return res
+          .status(404)
+          .json({ error: "Complaint not found" });
+      }
+
+      title       = complaint.title;
+      description = complaint.description;
+      category    = complaint.category;
+    }
+
+    if (!title || !description) {
+      return res.status(400).json({
+        error: "title and description are required",
+      });
+    }
+
+    const prompt = `
+You are an AI assistant for a municipal complaint management system.
+
+Analyze the following complaint and return a JSON object with these exact keys:
+
+- priority    : "Low" | "Medium" | "High" | "Critical"
+- department  : name of the responsible government department
+- summary     : 1-2 sentence summary of the complaint
+- autoResponse: a polite, professional response message
+
+Complaint Details:
+Title      : ${title}
+Category   : ${category || "Not specified"}
+Description: ${description}
+
+Respond with ONLY valid JSON.
+`;
+
+    const message = await client.messages.create({
+      model: "claude-3-5-sonnet-20241022",
+      max_tokens: 512,
+
+      messages: [
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+    });
+
+    let aiResult;
+
+    try {
+      aiResult = JSON.parse(message.content[0].text);
+
+    } catch {
+      return res.status(500).json({
+        error: "AI returned invalid JSON",
+        raw: message.content[0].text,
+      });
+    }
+
+    // Save AI result
+    if (complaint) {
+      complaint.aiPriority   = aiResult.priority || "";
+      complaint.aiDepartment = aiResult.department || "";
+      complaint.aiSummary    = aiResult.summary || "";
+      complaint.aiResponse   = aiResult.autoResponse || "";
+
+      await complaint.save();
+    }
+
+    res.json({
+      message: "AI analysis complete",
+
+      priority: aiResult.priority,
+      department: aiResult.department,
+      summary: aiResult.summary,
+      autoResponse: aiResult.autoResponse,
+
+      ...(complaint && {
+        updatedComplaint: complaint,
+      }),
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+    });
+  }
+});
+
+// ─────────────────────────────────────────────
+// GLOBAL ERROR HANDLER
+// ─────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+
+  res.status(500).json({
+    error: "Internal Server Error",
+    details: err.message,
+  });
+});
+
+// ─────────────────────────────────────────────
+// MONGODB CONNECTION & SERVER START
+// ─────────────────────────────────────────────
+const PORT = process.env.PORT || 5000;
+
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  "mongodb://localhost:27017/complaint_db";
+
+mongoose
+  .connect(MONGO_URI)
+  .then(() => {
+    console.log("✅ MongoDB connected");
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error(
+      "❌ MongoDB connection failed:",
+      err.message
+    );
+
+    process.exit(1);
+  });
