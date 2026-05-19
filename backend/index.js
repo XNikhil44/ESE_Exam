@@ -15,13 +15,9 @@ dotenv.config();
 
 const app = express();
 
-// OpenRouter config from .env
 const OPENROUTER_API_KEY  = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 
-// ─────────────────────────────────────────────
-// MIDDLEWARE
-// ─────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
@@ -29,7 +25,6 @@ app.use(express.json());
 // MONGOOSE SCHEMAS & MODELS
 // ─────────────────────────────────────────────
 
-// User Schema
 const UserSchema = new mongoose.Schema({
   name:     { type: String, required: [true, "Name is required"], trim: true },
   email:    { type: String, required: [true, "Email is required"], unique: true,
@@ -39,23 +34,18 @@ const UserSchema = new mongoose.Schema({
   createdAt:{ type: Date, default: Date.now },
 });
 
-// Hash password before saving
 UserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
 
-// Compare plain password with hashed
 UserSchema.methods.matchPassword = async function (plain) {
   return bcrypt.compare(plain, this.password);
 };
 
 const User = mongoose.model("User", UserSchema);
 
-// ──────────────────────────────────────────────
-
-// Complaint Schema
 const ComplaintSchema = new mongoose.Schema({
   name:        { type: String, required: [true, "Name is required"], trim: true },
   email:       { type: String, required: [true, "Email is required"],
@@ -67,7 +57,6 @@ const ComplaintSchema = new mongoose.Schema({
   location:    { type: String, required: [true, "Location is required"], trim: true },
   status:      { type: String, enum: ["Pending", "In Progress", "Resolved", "Rejected"],
                  default: "Pending" },
-  // AI-generated fields
   aiPriority:   { type: String, default: "" },
   aiDepartment: { type: String, default: "" },
   aiSummary:    { type: String, default: "" },
@@ -99,17 +88,13 @@ const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET || "secret123", { expiresIn: "7d" });
 
 // ─────────────────────────────────────────────
-// ROOT HEALTH CHECK
+// ROUTES
 // ─────────────────────────────────────────────
+
 app.get("/", (req, res) => {
   res.json({ message: "AI Complaint Management API is running 🚀" });
 });
 
-// ─────────────────────────────────────────────
-// AUTH ROUTES
-// ─────────────────────────────────────────────
-
-// POST /api/auth/signup
 app.post("/api/auth/signup", async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -126,7 +111,6 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 });
 
-// POST /api/auth/login
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -144,16 +128,10 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// GET /api/auth/profile  (protected)
 app.get("/api/auth/profile", protect, (req, res) => {
   res.json({ user: req.user });
 });
 
-// ─────────────────────────────────────────────
-// COMPLAINT ROUTES
-// ─────────────────────────────────────────────
-
-// POST /api/complaints  — Add Complaint
 app.post("/api/complaints", async (req, res) => {
   try {
     const { name, email, title, description, category, location } = req.body;
@@ -164,7 +142,6 @@ app.post("/api/complaints", async (req, res) => {
   }
 });
 
-// GET /api/complaints  — Get All Complaints (optional ?category= & ?status= filter)
 app.get("/api/complaints", async (req, res) => {
   try {
     const { category, status } = req.query;
@@ -178,8 +155,6 @@ app.get("/api/complaints", async (req, res) => {
   }
 });
 
-// GET /api/complaints/search?location=Ghaziabad  — Search by Location
-// NOTE: This route MUST be defined before /:id
 app.get("/api/complaints/search", async (req, res) => {
   try {
     const { location } = req.query;
@@ -193,7 +168,6 @@ app.get("/api/complaints/search", async (req, res) => {
   }
 });
 
-// GET /api/complaints/:id  — Get Single Complaint
 app.get("/api/complaints/:id", async (req, res) => {
   try {
     const complaint = await Complaint.findById(req.params.id);
@@ -204,7 +178,6 @@ app.get("/api/complaints/:id", async (req, res) => {
   }
 });
 
-// PUT /api/complaints/:id  — Update Complaint Status (protected)
 app.put("/api/complaints/:id", protect, async (req, res) => {
   try {
     const { status } = req.body;
@@ -220,7 +193,6 @@ app.put("/api/complaints/:id", protect, async (req, res) => {
   }
 });
 
-// DELETE /api/complaints/:id  — Delete Complaint (protected)
 app.delete("/api/complaints/:id", protect, async (req, res) => {
   try {
     const complaint = await Complaint.findByIdAndDelete(req.params.id);
@@ -232,16 +204,13 @@ app.delete("/api/complaints/:id", protect, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// AI ROUTE — OpenRouter
+// AI ROUTE — OpenRouter (GPT-4o-mini)
 // ─────────────────────────────────────────────
-
-// POST /api/ai/analyze
 app.post("/api/ai/analyze", async (req, res) => {
   try {
     let { complaintId, title, description, category } = req.body;
     let complaint = null;
 
-    // If complaintId given, load from DB
     if (complaintId) {
       complaint = await Complaint.findById(complaintId);
       if (!complaint) return res.status(404).json({ error: "Complaint not found" });
@@ -253,6 +222,9 @@ app.post("/api/ai/analyze", async (req, res) => {
     if (!title || !description) {
       return res.status(400).json({ error: "title and description are required" });
     }
+
+    // Log to verify key is loaded
+    console.log("OpenRouter Key present:", !!OPENROUTER_API_KEY);
 
     const prompt = `You are an AI assistant for a municipal complaint management system.
 Analyze the following complaint and return a JSON object with these exact keys:
@@ -268,18 +240,17 @@ Description: ${description}
 
 Respond with ONLY valid JSON. No markdown, no extra text.`;
 
-    // Call OpenRouter API
     const response = await axios.post(
       `${OPENROUTER_BASE_URL}/chat/completions`,
       {
-        model: "mistralai/mistral-7b-instruct:free",
+        model: "openai/gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
       },
       {
         headers: {
           "Authorization":  `Bearer ${OPENROUTER_API_KEY}`,
           "Content-Type":   "application/json",
-          "HTTP-Referer":   "http://localhost:5000",
+          "HTTP-Referer":   "https://ese-exam-z3t8.onrender.com",
           "X-Title":        "AI Complaint Management",
         },
       }
@@ -289,14 +260,12 @@ Respond with ONLY valid JSON. No markdown, no extra text.`;
 
     let aiResult;
     try {
-      // Strip markdown code block if model wraps in ```json ... ```
       const cleaned = rawText.replace(/```json|```/g, "").trim();
       aiResult = JSON.parse(cleaned);
     } catch {
       return res.status(500).json({ error: "AI returned invalid JSON", raw: rawText });
     }
 
-    // Save AI results back to the complaint document if ID was given
     if (complaint) {
       complaint.aiPriority   = aiResult.priority    || "";
       complaint.aiDepartment = aiResult.department  || "";
@@ -314,7 +283,12 @@ Respond with ONLY valid JSON. No markdown, no extra text.`;
       ...(complaint && { updatedComplaint: complaint }),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // Detailed error logging
+    console.error("AI Route Error:", err.response?.data || err.message);
+    res.status(500).json({
+      error: err.message,
+      details: err.response?.data || null,
+    });
   }
 });
 
@@ -333,7 +307,7 @@ const PORT      = process.env.PORT      || 5000;
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/complaint_db";
 
 mongoose
-  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .connect(MONGO_URI)
   .then(() => {
     console.log("✅  MongoDB connected");
     app.listen(PORT, () => console.log(`🚀  Server running on port ${PORT}`));
